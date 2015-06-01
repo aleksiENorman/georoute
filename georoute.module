@@ -1,0 +1,929 @@
+<?php
+
+/**
+ * @file: georoute.module
+ *
+ * Implements georoutes on the muporiokaunis site
+ *
+ */
+
+/**
+ * Implements hook_permission()
+ */
+function georoute_permission() {
+  return array(
+    'administer georoutes' => 
+      array(
+	'title' => t('Administer Georoutes'),
+	'description' => t('Edit, create and remove georoutes. <strong>Trusted roles only</strong>.'),
+      ),
+    'use georoutes' =>
+      array(
+	'title' => t('Use georoute'),
+	'description' => t('Use the georoute interface to find geomarkers and save them to user account.'),
+      )    
+    );
+}
+
+/**
+ * Implements hook_admin_paths
+ */
+function georoute_admin_paths() {
+  return array(
+    'georoute/*' => TRUE, 
+    'georoute/*/edit' => TRUE,
+    'georoute/*/markers' => TRUE, 
+    'georoute/*/delete' => TRUE, 
+  );
+}
+
+/**
+ * Implements hook_menu()
+ */
+function georoute_menu() {
+  return array(
+      'admin/structure/georoutes' =>
+	array(
+	  'title' => t('Georoutes'),
+	  'page callback' => 'georoutes_table',
+	  'access arguments' => array('administer georoutes'),
+	  'type' => MENU_NORMAL_ITEM,
+	),
+      'admin/structure/georoutes/new' =>
+	array(
+	  'title' => t('Create georoute'),
+	  'page callback' => 'drupal_get_form',
+	  'page arguments' => array('georoute_new'),
+	  'access arguments' => array('administer georoutes'),
+	  'type' => MENU_LOCAL_ACTION,
+	),
+      'georoute/%' =>
+	array(
+	  'title' => t('Edit georoute'),
+	  'page callback' => 'drupal_get_form',
+	  'page arguments' => array('georoute_edit', 1),
+	  'access arguments' => array('administer georoutes'),
+	),
+      'georoute/%/edit' =>	
+	array(
+	  'title' => t('Edit georoute'),
+	  'page callback' => 'drupal_get_form',
+	  'page arguments' => array('georoute_edit', 1),
+	  'access arguments' => array('administer georoutes'),
+	  'type' => MENU_DEFAULT_LOCAL_TASK,
+	  'context' => MENU_CONTEXT_PAGE | MENU_CONTEXT_INLINE,
+	),	
+      'georoute/%/markers' =>
+	array(
+	  'title' => t('Edit markers'),
+	  'page callback' => 'geomarkers_table',
+	  'page arguments' => array(1),
+	  'access arguments' => array('administer georoutes'),
+	  'type' => MENU_LOCAL_TASK,
+	  'context' => MENU_CONTEXT_PAGE,
+	),	
+      'georoute/%/delete' =>
+	array(
+	  'title' => t('Delete georoute'),
+	  'page callback' => 'georoute_delete',
+	  'page arguments' => array(1),
+	  'access arguments' => array('administer georoutes'),
+	  'type' => MENU_LOCAL_TASK,
+	  'weight' => 10,
+	),
+      'rasti/%' => 
+	array(
+	  'title' => t('Check geomarker'),
+	  'page callback' => 'geomarker_evaluate',
+	  'access arguments' => array('use georoutes'),
+	  'page arguments' => array(1),
+	  'type' => MENU_LOCAL_ACTION,
+	),
+      'reitti' =>
+	array(
+	  'title' => t('Routes'),
+	  'page callback' => 'georoute_page',
+	  'access arguments' => array('use georoutes'),
+	  'type' => MENU_NORMAL_ITEM,
+	),
+    );
+}
+
+/**
+ * Implements hook_theme()
+ */
+function georoute_theme() {
+  return array(
+    'georoute_page' => array(
+      'template' => 'georoute-page',
+      'arguments' => array('data' => null, 'page' => null),
+    ),
+  );
+}
+
+/**
+ * Implements hook_preprocess_georoute_page()
+ * 
+ * Theming function for the georoute page.
+ */
+function georoute_preprocess_georoute_page(&$vars) {
+  $vars['title'] = $vars['name'];
+  $vars['body'] = nl2br($vars['description']);
+  
+  $vars['links'] = array();
+  $vars['links'][] = l( ($vars['save']) ? t('Load') : t('Start'), 'reitti/' . $vars['machine_name']);
+  if ($vars['save'])
+    $vars['links'][] = l( t('Reset'), 'reitti/' . $vars['machine_name'] . '/reset');
+}
+
+function georoute_page($route = NULL, $option = NULL) {
+  global $user;
+  
+  if ($route) {
+//     if (! user_access('use_georoutes')) {
+//       drupal_set_message(t('You need to login to use georoutes'), 'error');
+//       drupal_access_denied();
+//       drupal_exit();
+//     }
+
+    if ($option === 'reset') {
+      user_reset_geomarkers($user, $route);
+      drupal_set_message(t('Route reset'));
+      drupal_goto('reitti');
+    }
+
+    if ($user->uid) {
+      /**
+      * Try to get an existing pointer first
+      * (This is the most likely scenario)
+      * (NOTE INNER JOIN: Both pointer and pointed need to exist)
+      */
+      $marker = db_query('SELECT marker.nid AS nid FROM {geomarker_pointer} AS pointer' .
+			' INNER JOIN {geomarker} AS marker ON marker.hash = pointer.hash' .
+			' WHERE marker.route = :route AND pointer.uid = :uid',
+			    array(':route' => $route, ':uid' => $user->uid)
+			);
+      /* If the pointer does exist, be happy and go to that geomarker page */
+      if ($marker->rowCount())
+	drupal_goto('node/' . $marker->fetchField());
+    } 
+      
+    /**
+      * The existing pointer lookup failed. Check that the route does infact exist.
+      */
+    if (db_query('SELECT COUNT(machine_name) FROM {georoute} WHERE machine_name = :route AND visibility > 1', array(':route' => $route))->fetchField() ) {
+      /**
+      * It does, so we make a new pointer for this user on this route to level 0
+      */
+      $ptr = geomarker_update_pointer($route, 0, $user);
+
+      if (! $ptr) {
+	drupal_set_message(t('Route %s doesn\'t have any markers', array('%s' => $route)), 'error');
+	drupal_goto('reitti');
+      }
+      
+      drupal_goto('node/' . $ptr->nid);
+    }
+    
+    /* No georoute by that name exists -> 404 page */
+    drupal_set_message(t('No georoute with name %name', array('%name' => $route)), 'error');
+    drupal_not_found();
+  }
+
+  $array = array();
+  
+  /* fetch the saved georoutes for users*/
+  if ($user->uid) {
+    $query = db_select('geomarker_history', 'history');
+    $query->leftJoin('geomarker', 'marker', 'marker.hash = history.hash');
+    $query->innerJoin('georoute', 'route', 'route.machine_name = marker.route');
+    $query->condition('history.uid', $user->uid, '=');
+    $query->condition('route.visibility', 1, '>=');
+    $query->fields('route', array('name', 'machine_name', 'description'));
+  } else {
+    $passed = array_values(_get_geomarkers_cookie());
+    
+    $query = db_select('geomarker', 'marker');
+    $query->leftJoin('georoute', 'route', 'route.machine_name = marker.route');
+    $query->condition('route.visibility', 1, '>=');
+    if ($passed)
+      $query->condition('marker.hash', $passed, 'IN');
+    $query->fields('route', array('name', 'machine_name', 'description'));
+  }    
+
+  if ( (! isset($passed)) || (! empty($passed)) ) {
+    $result = $query->execute();
+    while( $row = $result->fetchAssoc() ) {
+      $array[$row['machine_name']] = $row;
+      $array[$row['machine_name']]['save'] = true;
+    }
+  }
+  
+  /* fetch the unopened georoutes */
+  $query = db_select('georoute')->
+	      condition('georoute.visibility', 2, '>=')->
+	      fields('georoute', array('name', 'machine_name', 'description'));
+  $result = $query->execute();
+
+  while( $row = $result->fetchAssoc() )
+    if (! isset($array[$row['machine_name']])) {
+      $array[$row['machine_name']] = $row;
+      $array[$row['machine_name']]['save'] = false;
+    }
+    
+  $output = '';
+  foreach ($array as $row)
+    $output .= theme('georoute_page', $row, false);    
+    
+  return $output;
+}
+
+/**
+ * Evaluates the hash from the URL
+ * @see georoute_menu(): rasti/%
+ */
+function geomarker_evaluate($hash) {
+  global $user;
+  
+  $result = db_query('SELECT m.nid AS nid, m.route AS route, m.level AS level, r.level_criteria AS level_criteria_all FROM {geomarker} AS m' .
+		     ' INNER JOIN {georoute} AS r ON r.machine_name = m.route WHERE m.hash = :hash', array(':hash' => $hash));
+
+  if ( $result->rowCount() ) {
+    /* It checks out */  
+    $data = $result->fetchAssoc();
+  
+    /* Store the key */
+    geomarker_store_key( $hash, $user );
+
+    /* Advance in levels */
+    if ( ($data['level_criteria_all'] && geomarker_check_level_complete($data['route'], $data['level'], $user) ) ||
+	 (! $data['level_criteria_all']) )
+      $data['level']++;
+    
+    $newmarker = geomarker_update_pointer($data['route'], $data['level'], $user, $hash);
+    
+    /* check for level completion */
+    if (! $newmarker) {
+      drupal_set_message(t('Congratulations, you have completed the route'));
+      drupal_goto('reitti');
+    }
+    
+    /* Otherwise go to the nid where the geomarker table points us to */
+    drupal_goto('node/' . $newmarker->nid);
+  } else {  
+    drupal_set_message(t('Invalid or out-of-sequence geomarker'), 'error');
+    
+    drupal_goto('reitti');
+  }
+}
+
+
+/**
+ * Stores a key into the user georoute relation
+ */
+function geomarker_store_key($hash, $account) {
+  if ($account->uid) {
+    db_query('INSERT INTO {geomarker_history} (hash, discovered, uid) VALUES (:hash, :time, :uid)', 
+	      array(':hash' => $hash, ':time' => REQUEST_TIME, ':uid' => $account->uid));
+  } else {
+    $array = _get_geomarkers_cookie();
+    if (! in_array($hash, $array)) {
+      $array[REQUEST_TIME] = $hash;
+      _set_geomarkers_cookie($array);
+    }
+  }
+}
+
+
+/**
+ * Refreshes the geomarker pointer
+ */
+function geomarker_update_pointer($route, $order, $account, $oldhash = NULL) {
+
+  if (! $oldhash) {
+    /* If oldhash hasn't been determined, try to find it */
+  
+    if ($account->uid) {
+      /**
+      * We take the hash value of the previous pointer 
+      * from this user on this route
+      * (NOTE LEFT JOIN: an inner join here could create a duplicate on the pointer table)
+      */
+
+      $oldhash = db_query('SELECT m.hash AS hash FROM {geomarker} AS m' .
+			  ' LEFT JOIN {geomarker_pointer} AS ptr ON m.hash = ptr.hash' .
+			  ' WHERE ptr.uid = :uid AND m.route = :route', 
+			    array(':uid' => $account->uid, ':route' => $route)
+			);
+
+      $oldhash = $oldhash->rowCount() ? $oldhash->fetchField() : NULL;
+    } else if ($passed = _get_geomarkers_cookie()) {
+	/* Find all geomarkers of this route */
+	$query = db_select('geomarker', 'marker');
+	$query->condition('marker.route', $route, '=');
+	$query->fields('marker', array('hash'));
+	$oldhashes = $query->execute()->fetchCol();
+
+	/* Sort the discovered geomarkers according to timestamp
+	   and match them against the hashes of this route */
+	krsort($passed, SORT_NUMERIC);
+	foreach($passed as $p)
+	  if (in_array($p, $oldhashes)) {
+	    $oldhash = $p;
+	    break;
+	  }
+    }
+  }
+
+  $do_long_query = true;
+  if ($oldhash)  {
+    /** If we have an oldhash, maybe the the next hash field of the geomarker
+      * will tell us where we want to go 
+      */  
+    $query = db_query('SELECT hash, nid, route FROM {geomarker} WHERE hash = (SELECT next_hash FROM {geomarker} WHERE hash = :oldhash)',
+		      array(':oldhash' => $oldhash));
+		      
+    if ($query->rowCount()) {
+      $do_long_query = false;
+      $return = $query->fetchObject();
+    }
+  }
+
+  if ($do_long_query) {
+    if ($account->uid) {
+  
+      /** Select where pointer will point
+      *  LOGIC: we choose a geomarker whiches level is higher than $order.
+      *     Then we sort for the least level. If multiple geomarkers
+      *     of the same level exist, choose at random (take random sample of 1)
+      */
+      $query = db_query('SELECT marker.hash AS hash, marker.nid AS nid, marker.route AS route FROM {geomarker} AS marker' .
+			' LEFT JOIN {geomarker_history} AS history ON history.hash = marker.hash AND history.uid = :uid' .
+			' WHERE marker.route = :route AND marker.level >= :level AND history.hash IS NULL' .
+			' ORDER BY marker.level ASC, RAND() ASC' .
+			' LIMIT 1', 
+			array(':uid' => $account->uid, ':route' => $route, ':level' => $order));
+
+      /* Check for route completion */
+      if (! $query->rowCount() )
+	return NULL;  
+	
+      $return = $query->fetchObject();
+    } else {
+      $passed = array_values(_get_geomarkers_cookie());
+    
+      $query = db_select('geomarker', 'marker');
+      $query->condition('marker.route', $route, '=');
+      $query->condition('marker.level', $order, '>=');
+      if ($passed)
+	$query->condition('marker.hash', $passed, 'NOT IN');
+      $query->orderBy('marker.level', 'ASC');
+      $query->orderBy('RAND()', 'ASC');
+      $query->fields('marker', array('hash', 'nid', 'route'));
+      $return = $query->execute()->fetchObject();
+      
+      if (! $return)
+	return NULL;
+    }
+  }
+
+  if ($account->uid) {
+    if ( $oldhash ) {
+      /* We have the hash, so we are indeed progressing on the route */  
+      db_query( 
+		'UPDATE {geomarker_pointer} SET hash = :hash WHERE uid = :uid AND hash = :oldhash',
+		array(':hash' => $return->hash, ':uid' => $account->uid, ':oldhash' => $oldhash )
+	      );
+    } else {
+      /* This is the initial geomarker here */
+      db_query( 
+		'INSERT INTO {geomarker_pointer} (hash, uid) VALUES (:hash, :uid)', 
+		array(':hash' => $return->hash, ':uid' => $account->uid)
+	      );
+    }
+  } /* only logged in users use pointers */
+  
+  /* return the pointer we chose at the top */  
+  return $return;
+}
+
+/**
+ * Checks for level completion
+ */
+function geomarker_check_level_complete($route, $order, $account) {
+  $markers_total_this_level = 
+    db_query('SELECT COUNT(hash) FROM {geomarker} WHERE route = :route AND level = :level', 
+      array(':route' => $route, ':level' => $order)
+    )->fetchField();
+
+  if ($account->uid) {
+    $markers_user_this_level =
+      db_query('SELECT COUNT(geomarker.hash) FROM {geomarker_history} AS history' .
+		' LEFT JOIN {geomarker} ON history.hash = geomarker.hash' .
+		' WHERE history.uid = :uid AND geomarker.route = :route AND geomarker.level = :level', 
+	array(':uid' => $account->uid, ':route' => $route, ':level' => $order)
+      )->fetchField();
+  } else {
+    if ($markers = _get_geomarkers_cookie()) {
+      $markers_user_this_level = 
+	db_query('SELECT COUNT(hash) FROM {geomarker}' .
+		' WHERE level = :level AND route = :route AND hash IN (:markers)',
+		array(':level' => $order, ':route' => $route, ':markers' => $markers)
+		)->fetchField();
+    } else {
+      $markers_user_this_level = 0;
+    }
+  }
+    
+  return $markers_total_this_level <= $markers_user_this_level;
+}
+
+/**
+ * Geomarker_form_alter(): Implements hook_form_alter:
+ * Adds geomarker fields to node upload implementation
+ */
+function georoute_form_alter(&$form, &$form_state, $form_id) {
+
+  if (preg_match('/node_form$/', $form_id) && user_access('administer georoutes') ) {
+
+    $node = $form_state['node'];
+
+    $marker = array('hash' => '', 'level' => '0');
+   
+    if (isset($node->nid) ) {
+      $marker_result = db_select('geomarker', 'marker')->
+		       condition('marker.nid', $node->nid, '=')->
+		       fields('marker', array('hash', 'next_hash', 'level', 'route'))->
+		       execute();
+
+      if ($marker_result->rowCount())
+	$marker = $marker_result->fetchAssoc();
+    }
+    
+    $form['geomarker'] = array(
+        '#type' => 'fieldset',
+        '#access' => 'administer georoutes',
+        '#title' => t('Geomarker'),
+        '#collapsible' => TRUE,
+        '#collapsed' => TRUE,
+        '#group' => 'additional_settings',
+        '#weight' => 100,
+        'route' => array(
+            '#type' => 'select',
+            '#title' => t('Select the route of this node'),
+            '#options' => georoute_route_names(1),
+        ),
+        'hash' => array(
+	  '#title' => t('Hash'),
+	  '#type' => 'textfield',
+	  '#default_value' => $marker['hash'],
+	  '#description' => t('The hashcode of this geomarker. The path of this marker is <span><strong id="hash-url">http://www.muporiokaunis.fi/rasti/<span id="hash-value">[this hashcode]</span></strong></span>.'),
+	  '#weight' => -1,
+	),
+	'next_hash' => array(
+	  '#title' => t('Next'),
+	  '#empty_option' => t('Select automatically'),
+	  '#type' => 'select',
+	  '#options' => georoute_marker_names(1),
+	),	
+	'level' => array(
+	  '#title' => t('Level'),
+	  '#type' => 'select',
+	  '#options' => range(0, 39),
+	  '#default_value' => $marker['level'],
+	  '#description' => t('The level of the geomarker. Georoute settings define the behavior of this field:' .
+			      '<ul><li>On setting "Complete on all" only levels markers are visible</li>' .
+			      '<li>On setting "Complete on any" controls the flow of the game</li></ul>'),
+	),
+    );
+    
+    if (! isset($form['#attached']))
+      $form['#attached'] = array();
+
+    if (! isset($form['#attached']['js']))
+      $form['#attached']['js'] = array();
+      
+    $form['#attached']['js'][drupal_get_path('module', 'georoute') . '/js/georoute.js'] = array('type' => 'file');
+    
+    if (isset($marker['route']))
+      $form['geomarker']['route']['#default_value'] = $marker['route'];
+
+    if (isset($marker['next_hash']))
+      $form['geomarker']['next_hash']['#default_value'] = $marker['route'];
+      
+  }
+}
+
+/**
+ * geomarker_submit(): submit handler for node_save()
+ */
+function georoute_node_submit($node, &$form, &$form_values) {
+  
+  /* save the query if user doesn't have *
+   * access to administer georoutes	 */
+  if (! user_access('administer georoutes'))
+    return;
+
+  $values = $form_values['values'];
+  
+  if ($node->nid) {
+    $values['nid'] = $node->nid;
+  } else {
+    if ($values['hash'])
+      $GLOBALS['node_insert_values'] = $values;
+    return;
+  }
+  
+  $prev_value_results = db_select('geomarker')->
+			  fields('geomarker', array('hash'))->
+			  condition('nid', $values['nid'], '=')->
+			  execute();
+  
+  if ( $values['hash'] && $prev_value_results->rowCount() ) {
+    geomarker_update($values, $prev_value_results->fetchAssoc());
+  } else if ($values['hash']){
+    geomarker_insert($values);
+  } else if ($prev_value_results->rowCount() ) {
+    geomarker_delete($values);
+  }
+  
+}
+
+function georoute_node_insert($node) {
+
+  if ( isset($GLOBALS['node_insert_values']) ) {
+    $values = $GLOBALS['node_insert_values'];
+    $values['nid'] = $node->nid;
+    
+    geomarker_insert($values);
+  }
+  
+}
+
+/**
+ * geomarker_node_delete(): handler for node_delete
+ */
+function georoute_node_delete($node) {
+  geomarker_delete(array('nid' => $node->nid));
+}
+
+/**
+ * geomarker_node_delete(): handler for user_delete
+ */
+function georoute_user_delete($user) {
+  user_reset_geomarkers($user);
+}
+
+function user_reset_geomarkers($account, $route = NULL) {
+  if ($route && $account->uid) {
+    db_query('DELETE FROM {geomarker_pointer} WHERE uid = :uid AND hash IN (SELECT hash FROM {geomarker} WHERE route = :route)',
+	      array(':uid' => $account->uid, ':route' => $route)
+	    );
+    db_query('DELETE FROM {geomarker_history} WHERE uid = :uid AND hash IN (SELECT hash FROM {geomarker} WHERE route = :route)',
+	      array(':uid' => $account->uid, ':route' => $route)
+	    );
+		
+    drupal_set_message(t('Route reset'));
+    drupal_goto('reitti');
+  } else if ($account->uid) {
+    db_delete('geomarker_history')->condition('uid', $account->uid, '=');
+    db_delete('geomarker_pointer')->condition('uid', $account->uid, '=');
+  } else if ($route) {
+    $hashes = _get_geomarkers_cookie();
+  
+    $result = db_query('SELECT hash FROM {geomarker} WHERE route = :route', array(':route' => $route));
+    
+    while ( $d = $result->fetchField() )
+      unset($hashes[array_search($d, $hashes)]);
+    _set_geomarkers_cookie($hashes);
+  } else {
+    _unset_geomarkers_cookie();
+  }
+}
+
+function geomarker_insert($values) {
+  $conflict_result = db_query('SELECT COUNT(*) FROM {geomarker} WHERE hash = :hash', array(':hash' => $values['hash']))->
+    fetchField();
+  
+  if ($conflict_result) {
+    drupal_set_message(t('Geomarker hash must be unique'), 'error');
+    return;
+  }
+
+  $query = db_insert('geomarker')->
+    fields(array(
+      'hash' => $values['hash'],
+      'route' => $values['route'],
+      'level' => $values['level'],
+      'nid' => $values['nid'],
+      'next_hash' => $values['next_hash']
+    ));
+    
+  $query->execute();
+}
+
+function geomarker_update($values, $prev_values) {
+  $query = db_update('geomarker')->
+    condition('nid', $values['nid'], '=')->
+    fields(array(
+      'hash' => $values['hash'],
+      'route' => $values['route'],
+      'level' => $values['level'],
+      'nid' => $values['nid'],
+      'next_hash' => $values['next_hash']
+    ));
+
+  $query->execute();
+}
+
+function geomarker_delete($values) {
+  db_delete('geomarker')->
+    condition('nid', $values['nid'], '=');
+}
+
+
+/**
+ * Page function georoutes_table() :
+ *   Prints a listing of all georoutes on the site
+ */
+function georoutes_table() {
+  $query = db_select('georoute', 'r')->
+    extend('PagerDefault')->
+    fields('r', array('name', 'machine_name', 'description'))->
+    orderBy('r.name', 'ASC')->
+    limit(50);
+    
+  $result = $query->execute();
+  
+  if ($result->rowCount() == 0)
+    return t('No georoutes exist. You can start by creating one.');
+    
+  $header = array(t('Route'), '', '', '');
+  $rows = array();
+
+  while( $row = $result->fetchAssoc() ) {
+    $name = check_plain($row['name']) . ' <small>(' . t('Machine name: ') . $row['machine_name'] .  ')</small><br />';
+    if ($row['description'])
+      $name .= '<div class="description">' . filter_xss($row['description']) . '</div>';
+      
+    $rows[] = array($name,
+	      l(t('edit'), 'georoute/' . $row['machine_name'] . '/edit'),
+	      l(t('list markers'), 'georoute/' . $row['machine_name'] . '/markers'),
+	      l(t('delete'), 'georoute/' . $row['machine_name'] . '/delete')
+	    );
+  }
+  
+  $table = theme('table', array('header' => $header,
+				'rows' => $rows ));
+    
+ return $table . theme('pager');
+}
+
+function geomarkers_table($route) {
+  $query = db_select('geomarker', 'marker');
+  $query->fields('node', array('title'));
+  $query->fields('marker', array('nid', 'hash'));
+  $query->leftJoin('node', 'node', 'node.nid = marker.nid');
+  $query->condition('marker.route', $route, '=');
+  $query->orderBy('marker.level');
+  $result = $query->execute();
+		    
+  if ($result->rowCount() == 0)
+    return t('No geomarker exist for route %route. You may add them using the node form.', 
+	      array('%route' => admin_filter_xss($route)));
+	      
+  $header = array(t('Node'), t('URL'), '');
+  
+  $rows = array();
+
+  while( $row = $result->fetchAssoc() ) {
+    $rows[] = array(
+		l(check_plain($row['title']), 'node/' . $row['nid']),
+		url('rasti/' . $row['hash'], array('absolute' => true)),
+		l(t('edit'), 'node/' . $row['nid'] . '/edit'),
+	      );
+  }
+  
+  return theme('table', array('header' => $header,
+				'rows' => $rows ));
+}  
+    
+
+function georoute_new($form, &$form_state) {
+  return georoute_administrative_base();
+}
+
+function georoute_new_submit($form, &$form_values) {
+  $values = $form_values['values'];
+  
+  $query = db_insert('georoute')->
+    fields(array(
+      'name' => $values['name'],
+      'machine_name' => $values['machine_name'],
+      'description' => $values['description'],
+      'visibility' => $values['visibility'],
+      'level_criteria' => $values['level_completion'],      
+    ));
+    
+  $query->execute();
+  
+  drupal_set_message(t('Route saved'));
+}
+  
+
+function georoute_edit($form, &$form_state, $machine_name) {
+  $form = georoute_administrative_base();
+  
+  $result = db_select('georoute')->
+	      fields('georoute', array('name', 'machine_name', 'description', 'visibility', 'level_criteria'))->
+	      condition('machine_name', $machine_name, '=')->
+	      execute()->
+	      fetchAssoc();
+  
+  $form['name']['#default_value'] = $result['name'];
+  $form['machine_name']['#default_value'] = $machine_name;
+  $form['description']['#default_value'] = $result['description'];
+  $form['visibility']['#default_value'] = $result['visibility'];
+  $form['level_completion']['#default_value'] = $result['level_criteria'];
+  
+  $child_count = db_query('SELECT COUNT(hash) FROM {geomarker} WHERE route = :machine_name',
+			   array(':machine_name' => $machine_name))->fetchField();
+  
+  if ($child_count)
+    $form['machine_name']['#disabled'] = true;
+  
+  return $form;
+}
+    
+function georoute_edit_submit($form, &$form_values) {
+  $values = $form_values['values'];
+
+  $query = db_update('georoute')->
+    condition('machine_name', $values['machine_name'])->
+    fields(array(
+      'name' => $values['name'],
+      'machine_name' => $values['machine_name'],
+      'description' => $values['description'],
+      'visibility' => $values['visibility'],
+      'level_criteria' => $values['level_completion'],      
+    ));
+
+  $query->execute();
+  
+  drupal_set_message(t('Route saved'));
+}
+  
+function georoute_delete($machine_name) {
+  $child_count = db_query('SELECT COUNT(hash) FROM {geomarker} WHERE route = :machine_name',
+			   array(':machine_name' => $machine_name))->fetchField();
+
+  if ($child_count == 0) {
+    db_delete('georoute')->condition('machine_name', $machine_name, '=')->execute();
+  } else {
+    drupal_set_message(t('You must remove geomarkers before the route'), 'error');
+  }
+
+  drupal_goto('admin/structure/georoutes');
+}
+
+/**
+ * the base for georoute administrative forms
+ */
+function georoute_administrative_base() {
+  $form = array();
+ 
+  $form['name'] = array(
+    '#title' => t('Georoute name'),
+    '#type' => 'textfield',
+    '#size' => 40,
+    '#required' => true
+  );
+  
+  $form['machine_name'] = array(
+    '#type' => 'machine_name',
+    '#maxlength' => 32,
+    '#machine_name' => array(
+      'exists' => 'georoute_exists'
+    ),
+  );
+
+  $form['description'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Description'),
+    '#description' => t('This will be displayed to users on the /reitti page. You may include HTML.'),
+  );
+  
+  $form['visibility'] = array(
+    '#title' => t('Published'),
+    '#type' => 'radios',
+    '#options' => georoute_visibility_tr(),
+    '#required' => true
+  );
+
+  $form['level_completion'] = array(
+    '#title' => t('Level completion'),
+    '#type' => 'radios',
+    '#options' => georoute_completion_tr(),
+    '#description' => t('Whether a level is complete after any or all geomarkers on the level.'),
+    '#required' => true
+  );
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Save changes'),
+    '#weight' => 100,
+  );    
+  
+  return $form;
+}
+
+function georoute_exists($name) {
+  return db_query('SELECT COUNT(machine_name) FROM {georoute} WHERE machine_name = :mn', array(':mn' => $name))->fetchField();
+}
+
+function georoute_route_names($min_visibility = 2) {
+  $query = db_select('georoute', 'route')->
+    fields('route', array('name', 'machine_name'));
+    
+  if ($min_visibility)
+    $query->condition('visibility', $min_visibility, '>=');
+    
+  $result = $query->execute();
+  $routes = array();
+  while($row = $result->fetchAssoc())
+    $routes[$row['machine_name']] = $row['name'];
+    
+  return $routes;
+}
+      
+function georoute_marker_names($min_visibility = 2) {
+  $query = db_select('geomarker', 'marker');
+  $query->leftJoin('node', 'node', 'marker.nid = node.nid');
+  $query->fields('node', array('title'));
+  $query->fields('marker', array('hash'));
+
+  if ($min_visibility) {
+    $query->leftJoin('georoute', 'route', 'marker.route = route.machine_name');
+    $query->condition('route.visibility', $min_visibility, '>=');
+  }
+
+  $result = $query->execute();
+  $routes = array();
+  while($row = $result->fetchAssoc())
+    $routes[$row['hash']] = $row['title'];
+    
+  return $routes;
+}
+
+function georoute_visibility_tr($opt = NULL)
+{
+  $tr = array( t('disabled'), t('hidden'), t('public'));
+  
+  return ($opt !== NULL) ? $tr[$opt] : $tr;
+}
+
+
+function georoute_completion_tr($opt = NULL)
+{
+  $tr = array( t('Complete on any'), t('Complete on all') );
+  
+  return ($opt !== NULL) ? $tr[$opt] : $tr;
+}
+
+function _set_geomarkers_cookie(array $keys_array) {
+  $string = '';
+
+  $terms = count($keys_array);
+  foreach ($keys_array as $field => $value)
+  {
+    $terms--;
+    $string .= $field . '=' . $value;
+    if ($terms)
+      $string .= ':';
+  }
+
+  setcookie('geomarkerKeys', $string, time() + 3600 * 24 * 180, '/');
+  $_COOKIE['geomarkerKeys'] = $string;
+}
+
+function _unset_geomarkers_cookie() {
+  setcookie('geomarkerKeys', $string, 1, '/');
+  unset($_COOKIE['geomarkerKeys']);
+}
+
+function _get_geomarkers_cookie() {
+  if ( isset($_COOKIE['geomarkerKeys']) ) {
+    $keys = array();
+  
+    foreach (explode(':', $_COOKIE['geomarkerKeys']) as $pair) {
+      list($key, $value) = explode('=', $pair);
+      $keys[$key] = $value;
+    }
+    
+    return $keys;
+  } else {
+    return array();
+  }
+}
+
+?>

@@ -1,0 +1,134 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function georoute_schema() {
+  $schema['georoute'] = array(
+    'description' => 'The base table for georoutes',
+    'fields' => array(
+      'name' => array(
+	'type' => 'varchar',
+	'length' => 255,
+	'not null' => true,
+	'default' => '',
+      ),
+      'machine_name' => array(
+	'type' => 'varchar',
+	'length' => 32,
+	'not null' => true,
+      ),
+      'description' => array(
+	'type' => 'varchar',
+	'length' => 16000,
+	'not null' => true,
+	'default' => '',
+      ),
+
+      /**
+       * visibility:
+       *	0 = disabled
+       *	1 = hidden
+       *	2 = public
+       */      
+      'visibility' => array(
+	'type' => 'int',
+	'size' => 'tiny',
+	'default' => 0,
+      ),
+      
+     /**
+      *	level completion
+      *		0 = any marker complete
+      *		1 = all marker complete
+      */      
+      'level_criteria' => array(
+	'type' => 'int',
+	'size' => 'tiny',
+	'default' => 0,
+      ),
+    ),
+    'primary key' => array('machine_name'),
+    'indexes' => array('name' => array('name'))
+  );
+  
+  $schema['geomarker'] = array(
+    'description' => 'Table for geomarkers. Geomarkers extend nodes much in the same way as fields.',  
+    'fields' => array(
+      'level' => array(
+	'type' => 'int',
+	'length' => 10,
+	'not null' => true,
+      ),
+      'route' => array(
+	'type' => 'varchar',
+	'length' => 32,
+	'not null' => true,
+      ),
+      'nid' => array(
+	'type' => 'int',
+	'length' => 10,
+	'not null' => true,
+	'unsigned' => true,
+      ),
+      'hash' => array(
+	'type' => 'char',
+	'length' => 32,
+	'not null' => true,
+      ),
+      'next_hash' => array(
+	'type' => 'char',
+	'length' => 32,
+      ),      
+    ),
+    'primary key' => array('hash'),
+    'indexes' => array('level' => array('level')),
+    'unique keys' => array('nid' => array('nid')),    
+  );
+  
+  /* user -> geomarker (many) has a one to many relationship */
+  $schema['geomarker_history'] = array(
+    'description' => 'Table for geomarkers user uid has reached',
+    'fields' => array(
+      'uid' => array(
+	'type' => 'int',
+	'length' => 10,
+	'not null' => true,
+      ),
+      'hash' => array(
+	'type' => 'char',
+	'length' => 32,
+	'not null' => true,
+      ),
+      'discovered' => array(
+        'type' => 'int',
+        'not null' => true,
+        'default' => 0,
+      ),      
+    ),
+    'indexes' => array('hash' => array('hash'), 'uid' => array('uid')),
+  );
+  
+  $schema['geomarker_pointer'] = array(
+    'description' => 'Table for the next geomarker a user is striving for',
+    'fields' => array(
+      'uid' => array(
+	'type' => 'int',
+	'length' => 10,
+	'not null' => true,
+      ),
+      'hash' => array(
+	'type' => 'char',
+	'length' => 32,
+	'not null' => true,
+      ),
+    ),
+    'indexes' => array('hash' => array('hash'), 'uid' => array('uid')),
+    'unique keys' => array('geomarker_relation' => array('uid', 'hash')),
+  );
+  
+  
+  return $schema;
+}
+
+?>

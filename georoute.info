@@ -1,0 +1,7 @@
+name = Georoute
+description = Implements editable geocaching routes on the muporiokaunis site.
+dependencies[] = node
+dependencies[] = block
+
+core = 7.x
+package = Mu Pori o kaunis
